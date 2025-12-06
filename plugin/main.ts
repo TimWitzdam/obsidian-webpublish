@@ -37,6 +37,23 @@ type UploadResponse = {
 	url: string;
 };
 
+type AttachmentPayload = {
+	token: string;
+	filename: string;
+	mimeType: string;
+	data: ArrayBuffer;
+};
+
+type PreparedDocument = {
+	markdown: string;
+	attachments: AttachmentPayload[];
+};
+
+type MultipartPayload = {
+	body: ArrayBuffer;
+	contentType: string;
+};
+
 export default class WebPublishPlugin extends Plugin {
 	settings: WebPublishSettings;
 
@@ -82,11 +99,14 @@ export default class WebPublishPlugin extends Plugin {
 		new Notice("Uploading note to WebPublish…");
 		try {
 			const title = this.resolveTitle(file);
-			const preparedMarkdown = await this.expandImageEmbeds(
-				markdown,
-				file
-			);
-			const response = await this.publish(preparedMarkdown, title);
+			const prepared = await this.prepareDocument(markdown, file);
+			const multipart = this.buildMultipartPayload({
+				markdown: prepared.markdown,
+				noteFilename: file.name ?? `${file.basename}.md`,
+				title,
+				attachments: prepared.attachments,
+			});
+			const response = await this.publish(multipart, title);
 			await this.persistLinkMetadata(file, response.url);
 			await this.copyLinkToClipboard(response.url);
 			new Notice("Note shared successfully. Link copied to clipboard.");
@@ -109,16 +129,16 @@ export default class WebPublishPlugin extends Plugin {
 	}
 
 	private async publish(
-		markdown: string,
+		payload: MultipartPayload,
 		title: string
 	): Promise<UploadResponse> {
 		const endpoint = this.buildEndpoint("/documents");
 		const response = await requestUrl({
 			url: endpoint,
 			method: "POST",
-			body: markdown,
+			body: payload.body,
 			headers: {
-				"Content-Type": "text/markdown; charset=utf-8",
+				"Content-Type": payload.contentType,
 				"X-API-Key": this.settings.apiKey.trim(),
 				"X-Document-Title": title,
 			},
@@ -134,23 +154,25 @@ export default class WebPublishPlugin extends Plugin {
 		return data;
 	}
 
-	private async expandImageEmbeds(
+	private async prepareDocument(
 		markdown: string,
 		sourceFile: TFile
-	): Promise<string> {
+	): Promise<PreparedDocument> {
 		const pattern = /!\[\[([^\]]+)\]\]/g;
 		let match: RegExpExecArray | null;
 		let lastIndex = 0;
 		let changed = false;
 		let result = "";
+		const attachments: AttachmentPayload[] = [];
 		while ((match = pattern.exec(markdown)) !== null) {
 			result += markdown.slice(lastIndex, match.index);
-			const replacement = await this.convertEmbedMatch(
+			const conversion = await this.convertEmbedMatch(
 				match[1],
 				sourceFile
 			);
-			if (replacement) {
-				result += replacement;
+			if (conversion) {
+				result += conversion.replacement;
+				attachments.push(conversion.attachment);
 				changed = true;
 			} else {
 				result += match[0];
@@ -158,16 +180,19 @@ export default class WebPublishPlugin extends Plugin {
 			lastIndex = pattern.lastIndex;
 		}
 		if (!changed) {
-			return markdown;
+			return { markdown, attachments: [] };
 		}
 		result += markdown.slice(lastIndex);
-		return result;
+		return { markdown: result, attachments };
 	}
 
 	private async convertEmbedMatch(
 		embedTarget: string,
 		sourceFile: TFile
-	): Promise<string | null> {
+	): Promise<{
+		replacement: string;
+		attachment: AttachmentPayload;
+	} | null> {
 		const segments = embedTarget.split("|");
 		const linkpath = segments.shift()?.trim();
 		if (!linkpath) {
@@ -188,10 +213,20 @@ export default class WebPublishPlugin extends Plugin {
 		if (!mime) {
 			return null;
 		}
-		let base64: string;
 		try {
 			const binary = await this.app.vault.readBinary(target);
-			base64 = this.arrayBufferToBase64(binary);
+			const token = this.generateAttachmentToken();
+			const attachment: AttachmentPayload = {
+				token,
+				filename: this.sanitizeAttachmentName(target.name),
+				mimeType: mime,
+				data: binary,
+			};
+			const altText = this.pickAltText(segments, target.basename);
+			const replacement = `<img alt="${this.escapeHtmlAttribute(
+				altText
+			)}" data-embed-token="${token}" />`;
+			return { replacement, attachment };
 		} catch (error) {
 			console.warn(
 				`WebPublish: unable to read attachment for embed ${linkpath}`,
@@ -199,9 +234,6 @@ export default class WebPublishPlugin extends Plugin {
 			);
 			return null;
 		}
-		const altText = this.pickAltText(segments, target.basename);
-		const escapedAlt = this.escapeMarkdownText(altText);
-		return `![${escapedAlt}](data:${mime};base64,${base64})`;
 	}
 
 	private inferImageMimeType(extension: string): string | null {
@@ -241,19 +273,114 @@ export default class WebPublishPlugin extends Plugin {
 		return fallback;
 	}
 
-	private escapeMarkdownText(value: string): string {
-		return value.replace(/[\\\[\]]/g, (match) => `\\${match}`);
+	private escapeHtmlAttribute(value: string): string {
+		return value.replace(/[&"'<>]/g, (match) => {
+			switch (match) {
+				case "&":
+					return "&amp;";
+				case '"':
+					return "&quot;";
+				case "'":
+					return "&#39;";
+				case "<":
+					return "&lt;";
+				case ">":
+					return "&gt;";
+				default:
+					return match;
+			}
+		});
 	}
 
-	private arrayBufferToBase64(buffer: ArrayBuffer): string {
-		const bytes = new Uint8Array(buffer);
-		let binary = "";
-		const chunkSize = 0x8000;
-		for (let i = 0; i < bytes.length; i += chunkSize) {
-			const chunk = bytes.subarray(i, i + chunkSize);
-			binary += String.fromCharCode(...chunk);
+	private buildMultipartPayload(options: {
+		markdown: string;
+		title: string;
+		noteFilename: string;
+		attachments: AttachmentPayload[];
+	}): MultipartPayload {
+		const boundary = `----WebPublishFormBoundary${Date.now().toString(
+			16
+		)}${Math.random().toString(16).slice(2)}`;
+		const encoder = new TextEncoder();
+		const chunks: Uint8Array[] = [];
+		const pushString = (value: string) => {
+			chunks.push(encoder.encode(value));
+		};
+		const pushBinary = (data: ArrayBuffer) => {
+			chunks.push(new Uint8Array(data));
+		};
+		const appendField = (name: string, value: string) => {
+			pushString(`--${boundary}\r\n`);
+			pushString(
+				`Content-Disposition: form-data; name="${name}"\r\n\r\n`
+			);
+			pushString(`${value}\r\n`);
+		};
+
+		appendField("title", options.title ?? "");
+
+		const filename = this.sanitizeAttachmentName(
+			options.noteFilename || "note.md"
+		);
+		pushString(`--${boundary}\r\n`);
+		pushString(
+			`Content-Disposition: form-data; name="file"; filename="${filename}"\r\n`
+		);
+		pushString(`Content-Type: text/markdown; charset=utf-8\r\n\r\n`);
+		pushString(options.markdown);
+		pushString(`\r\n`);
+
+		for (const attachment of options.attachments) {
+			pushString(`--${boundary}\r\n`);
+			pushString(
+				`Content-Disposition: form-data; name="attachment-${attachment.token}"; filename="${attachment.filename}"\r\n`
+			);
+			pushString(`Content-Type: ${attachment.mimeType}\r\n`);
+			pushString(`Content-Transfer-Encoding: binary\r\n\r\n`);
+			pushBinary(attachment.data);
+			pushString(`\r\n`);
 		}
-		return btoa(binary);
+
+		pushString(`--${boundary}--\r\n`);
+
+		const totalLength = chunks.reduce(
+			(sum, chunk) => sum + chunk.length,
+			0
+		);
+		const body = new Uint8Array(totalLength);
+		let offset = 0;
+		for (const chunk of chunks) {
+			body.set(chunk, offset);
+			offset += chunk.length;
+		}
+
+		return {
+			body: body.buffer,
+			contentType: `multipart/form-data; boundary=${boundary}`,
+		};
+	}
+
+	private sanitizeAttachmentName(name: string): string {
+		const trimmed = name.trim() || "attachment";
+		return trimmed.replace(/[\\/]+/g, "_").replace(/\.\.+/g, ".");
+	}
+
+	private generateAttachmentToken(length = 16): string {
+		const charset =
+			"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+		const values = new Uint8Array(length);
+		if (window.crypto?.getRandomValues) {
+			window.crypto.getRandomValues(values);
+		} else {
+			for (let i = 0; i < length; i++) {
+				values[i] = Math.floor(Math.random() * 256);
+			}
+		}
+		let token = "";
+		for (const value of values) {
+			token += charset[value % charset.length];
+		}
+		return token;
 	}
 
 	private resolveTitle(file: TFile): string {

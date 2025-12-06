@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"html/template"
 	"io/fs"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -35,6 +37,7 @@ var htmlSanitizer = buildHTMLSanitizer()
 type Store struct {
 	markdownDir string
 	htmlDir     string
+	assetsDir   string
 	converter   goldmark.Markdown
 	mu          sync.Mutex
 }
@@ -42,6 +45,12 @@ type Store struct {
 type metadataEntry struct {
 	Key   string
 	Value string
+}
+
+type Attachment struct {
+	Token      string
+	StoredName string
+	Data       []byte
 }
 
 // Document represents a rendered markdown file.
@@ -60,8 +69,8 @@ func NewStore(baseDir string) (*Store, error) {
 
 	markdownDir := filepath.Join(baseDir, "markdown")
 	htmlDir := filepath.Join(baseDir, "html")
-
-	for _, dir := range []string{baseDir, markdownDir, htmlDir} {
+	assetsDir := filepath.Join(baseDir, "assets")
+	for _, dir := range []string{baseDir, markdownDir, htmlDir, assetsDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, fmt.Errorf("documents: create dir %s: %w", dir, err)
 		}
@@ -69,12 +78,17 @@ func NewStore(baseDir string) (*Store, error) {
 
 	conv := goldmark.New(
 		goldmark.WithExtensions(extension.GFM),
-		goldmark.WithRendererOptions(htmlrenderer.WithHardWraps(), htmlrenderer.WithXHTML()),
+		goldmark.WithRendererOptions(
+			htmlrenderer.WithHardWraps(),
+			htmlrenderer.WithXHTML(),
+			htmlrenderer.WithUnsafe(),
+		),
 	)
 
 	return &Store{
 		markdownDir: markdownDir,
 		htmlDir:     htmlDir,
+		assetsDir:   assetsDir,
 		converter:   conv,
 	}, nil
 }
@@ -83,7 +97,7 @@ func NewStore(baseDir string) (*Store, error) {
 // and returns the persisted document metadata. The optional titleOverride is used
 // when provided (e.g., from the uploader) instead of deriving the title from
 // metadata/headings.
-func (s *Store) Save(markdown []byte, titleOverride string) (*Document, error) {
+func (s *Store) Save(markdown []byte, titleOverride string, attachments []Attachment) (*Document, error) {
 	trimmed := bytes.TrimSpace(markdown)
 	if len(trimmed) == 0 {
 		return nil, ErrEmptyDocument
@@ -111,11 +125,18 @@ func (s *Store) Save(markdown []byte, titleOverride string) (*Document, error) {
 		}
 
 		markdownPath := filepath.Join(s.markdownDir, id+".md")
+		finalHTML := rendered
+		if len(attachments) > 0 {
+			finalHTML = replaceAttachmentLinks(rendered, id, attachments)
+		}
 		if err := os.WriteFile(markdownPath, trimmed, 0o644); err != nil {
 			return nil, fmt.Errorf("documents: write markdown: %w", err)
 		}
-		if err := os.WriteFile(htmlPath, rendered, 0o644); err != nil {
+		if err := os.WriteFile(htmlPath, finalHTML, 0o644); err != nil {
 			return nil, fmt.Errorf("documents: write html: %w", err)
+		}
+		if err := s.persistAttachments(id, attachments); err != nil {
+			return nil, err
 		}
 		doc = &Document{
 			ID:           id,
@@ -148,6 +169,68 @@ func (s *Store) LoadHTML(id string) ([]byte, error) {
 		return nil, fmt.Errorf("documents: read html: %w", err)
 	}
 	return data, nil
+}
+
+// LoadAsset returns the bytes and content type for a stored attachment.
+func (s *Store) LoadAsset(id string, name string) ([]byte, string, error) {
+	if !idPattern.MatchString(id) {
+		return nil, "", fs.ErrNotExist
+	}
+	cleanName := sanitizeRequestedAssetName(name)
+	if cleanName == "" {
+		return nil, "", fs.ErrNotExist
+	}
+	path := filepath.Join(s.assetsDir, id, cleanName)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, "", err
+		}
+		return nil, "", fmt.Errorf("documents: read asset: %w", err)
+	}
+	return data, http.DetectContentType(data), nil
+}
+
+func (s *Store) persistAttachments(docID string, attachments []Attachment) error {
+	if len(attachments) == 0 {
+		return nil
+	}
+	dir := filepath.Join(s.assetsDir, docID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("documents: create asset dir: %w", err)
+	}
+	for _, att := range attachments {
+		name := sanitizeStoredAssetName(att.StoredName)
+		if name == "" {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, att.Data, 0o644); err != nil {
+			return fmt.Errorf("documents: write asset: %w", err)
+		}
+	}
+	return nil
+}
+
+func replaceAttachmentLinks(htmlContent []byte, docID string, attachments []Attachment) []byte {
+	replaced := string(htmlContent)
+	for _, att := range attachments {
+		if att.Token == "" || att.StoredName == "" {
+			continue
+		}
+		relPath := fmt.Sprintf("/assets/%s/%s", url.PathEscape(docID), url.PathEscape(att.StoredName))
+		replaced = strings.ReplaceAll(replaced, fmt.Sprintf("data-embed-token=%q", att.Token), fmt.Sprintf("src=%q", relPath))
+	}
+	return []byte(replaced)
+}
+
+func sanitizeStoredAssetName(name string) string {
+	clean := filepath.Base(strings.TrimSpace(name))
+	return strings.ReplaceAll(clean, "..", "")
+}
+
+func sanitizeRequestedAssetName(name string) string {
+	return sanitizeStoredAssetName(name)
 }
 
 func (s *Store) renderHTML(markdown []byte, titleOverride string) ([]byte, error) {
@@ -260,7 +343,7 @@ footer { margin-top: 3rem; font-size: 0.875rem; color: #475569; text-align: cent
 {{.Body}}
 </main>
 <footer>
-<p>Published via Obsidian WebPublish · Generated {{.Generated}}</p>
+<p>Published via <a href="https://github.com/TimWitzdam/obsidian-webpublish" target="_blank">Obsidian WebPublish</a> · Generated {{.Generated}}</p>
 </footer>
 </body>
 </html>`))
@@ -409,5 +492,6 @@ func buildHTMLSanitizer() *bluemonday.Policy {
 	policy := bluemonday.UGCPolicy()
 	policy.AllowDataURIImages()
 	policy.AllowElements("table", "thead", "tbody", "tr", "th", "td")
+	policy.AllowAttrs("data-embed-token").OnElements("img")
 	return policy
 }
