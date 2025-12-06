@@ -1,0 +1,11 @@
+{
+	"id": "obsidian-webpublish",
+	"name": "WebPublish",
+	"version": "1.0.0",
+	"minAppVersion": "0.15.0",
+	"description": "Upload the current note to your self-hosted WebPublish API and share a short link.",
+	"author": "Tim Witzdam",
+	"authorUrl": "https://github.com/TimWitzdam",
+	"fundingUrl": "",
+	"isDesktopOnly": false
+}

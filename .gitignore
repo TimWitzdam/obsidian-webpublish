@@ -1,0 +1,50 @@
+# vscode
+.vscode 
+
+# Intellij
+*.iml
+.idea
+
+# npm
+plugin/node_modules
+
+# Don't include the compiled main.js file in the repo.
+# They should be uploaded to GitHub releases instead.
+plugin/main.js
+
+# Exclude sourcemaps
+*.map
+
+# obsidian
+data.json
+
+# Exclude macOS Finder (System Explorer) View States
+.DS_Store
+
+web/data
+web/config.yaml
+
+web/*.exe
+web/*.exe~
+web/*.dll
+web/*.so
+web/*.dylib
+
+# Test binary, built with `go test -c`
+web/*.test
+
+# Code coverage profiles and other test artifacts
+web/*.out
+web/coverage.*
+web/*.coverprofile
+web/profile.cov
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Go workspace file
+web/go.work
+web/go.work.sum
+
+# env file
+.env

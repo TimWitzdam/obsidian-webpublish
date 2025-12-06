@@ -1,0 +1,6 @@
+# Copy this file to config.yaml and customize the values for your environment.
+listenAddr: ":8080"
+baseURL: "http://localhost:8080"
+storageDir: "data"
+apiKeys:
+  - "replace-me"
