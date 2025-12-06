@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/microcosm-cc/bluemonday"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/extension"
 	htmlrenderer "github.com/yuin/goldmark/renderer/html"
@@ -28,6 +29,7 @@ const shortIDLength = 8
 var ErrEmptyDocument = errors.New("documents: markdown content is empty")
 
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9]{6,12}$`)
+var htmlSanitizer = buildHTMLSanitizer()
 
 // Store persists markdown documents as rendered HTML files.
 type Store struct {
@@ -158,12 +160,14 @@ func (s *Store) renderHTML(markdown []byte, titleOverride string) ([]byte, error
 	if err := s.converter.Convert(body, &rendered); err != nil {
 		return nil, fmt.Errorf("documents: render markdown: %w", err)
 	}
+	htmlBody := rendered.String()
+	sanitizedBody := htmlSanitizer.Sanitize(htmlBody)
 
 	title := deriveTitle(meta, body, titleOverride)
 	if title == "" {
 		title = "Shared note"
 	}
-	description := summarizeHTML(rendered.String())
+	description := summarizeHTML(sanitizedBody)
 	if description == "" {
 		description = "Shared note published via Obsidian WebPublish."
 	}
@@ -179,7 +183,7 @@ func (s *Store) renderHTML(markdown []byte, titleOverride string) ([]byte, error
 		Title:       title,
 		Description: description,
 		Metadata:    meta,
-		Body:        template.HTML(rendered.String()),
+		Body:        template.HTML(sanitizedBody),
 		Generated:   time.Now().Format(time.RFC1123),
 	}); err != nil {
 		return nil, fmt.Errorf("documents: wrap html: %w", err)
@@ -399,4 +403,11 @@ func truncateRunes(text string, limit int) string {
 		return text
 	}
 	return strings.TrimSpace(string(runes[:limit])) + "…"
+}
+
+func buildHTMLSanitizer() *bluemonday.Policy {
+	policy := bluemonday.UGCPolicy()
+	policy.AllowDataURIImages()
+	policy.AllowElements("table", "thead", "tbody", "tr", "th", "td")
+	return policy
 }
