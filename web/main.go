@@ -9,11 +9,13 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/TimWitzdam/obsidian-webpublish/config"
 	"github.com/TimWitzdam/obsidian-webpublish/internal/documents"
+	"github.com/TimWitzdam/obsidian-webpublish/internal/ratelimit"
 )
 
 const defaultConfigPath = "config.yaml"
@@ -34,14 +36,22 @@ func main() {
 		log.Fatalf("init document store: %v", err)
 	}
 
+	limiter := ratelimit.NewStore(
+		cfg.RateLimit.RequestsPerMinute,
+		cfg.RateLimit.Burst,
+		time.Hour,
+	)
+
 	router := gin.Default()
+	router.Use(ratelimit.Middleware(limiter))
 
 	router.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 	router.GET("/doc/:id", serveDocumentHandler(store))
-
-	protected := router.Group("", apiKeyMiddleware(cfg.APIKeys))
+	protected := router.Group("",
+		apiKeyMiddleware(cfg.APIKeys),
+	)
 	protected.POST("/documents", uploadDocumentHandler(store, cfg.BaseURL))
 
 	log.Printf("obsidian-webpublish listening on %s", cfg.ListenAddr)

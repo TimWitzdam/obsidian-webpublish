@@ -12,10 +12,16 @@ import (
 
 // Config holds all runtime options for the publishing service.
 type Config struct {
-	ListenAddr string   `yaml:"listenAddr"`
-	BaseURL    string   `yaml:"baseURL"`
-	StorageDir string   `yaml:"storageDir"`
-	APIKeys    []string `yaml:"apiKeys"`
+	ListenAddr string          `yaml:"listenAddr"`
+	BaseURL    string          `yaml:"baseURL"`
+	StorageDir string          `yaml:"storageDir"`
+	APIKeys    []string        `yaml:"apiKeys"`
+	RateLimit  RateLimitConfig `yaml:"rateLimit"`
+}
+
+type RateLimitConfig struct {
+	RequestsPerMinute int `yaml:"requestsPerMinute"`
+	Burst             int `yaml:"burst"`
 }
 
 // Load reads the YAML file at the provided path and returns a normalized Config.
@@ -71,6 +77,9 @@ func (c *Config) Validate() error {
 	if c.BaseURL == "" {
 		return errors.New("config: baseURL cannot be empty")
 	}
+	if err := c.RateLimit.Validate(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -84,9 +93,29 @@ func (c *Config) applyDefaults(configDir string) {
 	if strings.TrimSpace(c.StorageDir) == "" {
 		c.StorageDir = "data"
 	}
+	c.RateLimit.applyDefaults()
 
 	if configDir != "" && !filepath.IsAbs(c.StorageDir) {
 		c.StorageDir = filepath.Join(configDir, c.StorageDir)
 	}
 	c.BaseURL = strings.TrimRight(c.BaseURL, "/")
+}
+
+func (r *RateLimitConfig) applyDefaults() {
+	if r.RequestsPerMinute == 0 {
+		r.RequestsPerMinute = 120
+	}
+	if r.Burst == 0 {
+		r.Burst = 60
+	}
+}
+
+func (r *RateLimitConfig) Validate() error {
+	if r.RequestsPerMinute < 0 {
+		return errors.New("config: rateLimit.requestsPerMinute cannot be negative")
+	}
+	if r.Burst < 0 {
+		return errors.New("config: rateLimit.burst cannot be negative")
+	}
+	return nil
 }

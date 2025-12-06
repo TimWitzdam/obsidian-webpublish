@@ -4,3 +4,6 @@ baseURL: "http://localhost:8080"
 storageDir: "data"
 apiKeys:
   - "replace-me"
+rateLimit:
+  requestsPerMinute: 120 # average number of requests allowed per minute
+  burst: 60 # additional burst size allowed for short spikes
