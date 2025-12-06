@@ -1,0 +1,31 @@
+# Version control metadata
+.git
+.gitignore
+
+# Editor and IDE settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Dependency caches and vendor directories
+vendor/
+node_modules/
+
+# Build artifacts and temporary files
+bin/
+dist/
+tmp/
+*.log
+coverage.*
+*.out
+*.coverprofile
+
+# Local configuration and secrets
+config.yaml
+config/*.local.*
+*.env
+*.env.*
+
+# Generated runtime data (should be mounted via volume instead)
+data/

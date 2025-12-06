@@ -1,0 +1,9 @@
+services:
+  obsidian-webpublish:
+    image: timwitzdam/obsidian-webpublish:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config.yaml:/config.yaml
+      - ./data:/data
+    restart: unless-stopped
