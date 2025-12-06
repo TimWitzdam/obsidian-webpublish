@@ -17,11 +17,16 @@ type Config struct {
 	StorageDir string          `yaml:"storageDir"`
 	APIKeys    []string        `yaml:"apiKeys"`
 	RateLimit  RateLimitConfig `yaml:"rateLimit"`
+	Upload     UploadConfig    `yaml:"upload"`
 }
 
 type RateLimitConfig struct {
 	RequestsPerMinute int `yaml:"requestsPerMinute"`
 	Burst             int `yaml:"burst"`
+}
+
+type UploadConfig struct {
+	MaxBytes int64 `yaml:"maxBytes"`
 }
 
 // Load reads the YAML file at the provided path and returns a normalized Config.
@@ -80,6 +85,9 @@ func (c *Config) Validate() error {
 	if err := c.RateLimit.Validate(); err != nil {
 		return err
 	}
+	if err := c.Upload.Validate(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -94,6 +102,7 @@ func (c *Config) applyDefaults(configDir string) {
 		c.StorageDir = "data"
 	}
 	c.RateLimit.applyDefaults()
+	c.Upload.applyDefaults()
 
 	if configDir != "" && !filepath.IsAbs(c.StorageDir) {
 		c.StorageDir = filepath.Join(configDir, c.StorageDir)
@@ -116,6 +125,19 @@ func (r *RateLimitConfig) Validate() error {
 	}
 	if r.Burst < 0 {
 		return errors.New("config: rateLimit.burst cannot be negative")
+	}
+	return nil
+}
+
+func (u *UploadConfig) applyDefaults() {
+	if u.MaxBytes == 0 {
+		u.MaxBytes = 5 * 1024 * 1024 // 5 MiB default
+	}
+}
+
+func (u *UploadConfig) Validate() error {
+	if u.MaxBytes < 0 {
+		return errors.New("config: upload.maxBytes cannot be negative")
 	}
 	return nil
 }

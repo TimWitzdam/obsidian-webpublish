@@ -7,3 +7,5 @@ apiKeys:
 rateLimit:
   requestsPerMinute: 120 # average number of requests allowed per minute
   burst: 60 # additional burst size allowed for short spikes
+upload:
+  maxBytes: 20970000 # maximum upload size in bytes (default 20 MB)

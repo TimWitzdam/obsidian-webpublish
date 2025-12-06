@@ -20,6 +20,8 @@ import (
 
 const defaultConfigPath = "config.yaml"
 
+var errPayloadTooLarge = errors.New("document exceeds maximum allowed size")
+
 func main() {
 	cfgPath := os.Getenv("CONFIG_PATH")
 	if cfgPath == "" {
@@ -49,11 +51,11 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 	router.GET("/doc/:id", serveDocumentHandler(store))
-	protected := router.Group("",
+	protected := router.Group(
+		"",
 		apiKeyMiddleware(cfg.APIKeys),
 	)
-	protected.POST("/documents", uploadDocumentHandler(store, cfg.BaseURL))
-
+	protected.POST("/documents", uploadDocumentHandler(store, cfg.BaseURL, cfg.Upload.MaxBytes))
 	log.Printf("obsidian-webpublish listening on %s", cfg.ListenAddr)
 	if err := router.Run(cfg.ListenAddr); err != nil {
 		log.Fatalf("server error: %v", err)
@@ -79,11 +81,18 @@ func apiKeyMiddleware(keys []string) gin.HandlerFunc {
 	}
 }
 
-func uploadDocumentHandler(store *documents.Store, baseURL string) gin.HandlerFunc {
+func uploadDocumentHandler(store *documents.Store, baseURL string, maxUploadBytes int64) gin.HandlerFunc {
 	base := strings.TrimRight(baseURL, "/")
 	return func(c *gin.Context) {
+		if maxUploadBytes > 0 {
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxUploadBytes)
+		}
 		content, err := readMarkdownPayload(c)
 		if err != nil {
+			if errors.Is(err, errPayloadTooLarge) {
+				c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "document exceeds maximum upload size"})
+				return
+			}
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
@@ -136,12 +145,17 @@ func readMarkdownPayload(c *gin.Context) ([]byte, error) {
 		defer opened.Close()
 		data, err := io.ReadAll(opened)
 		if err != nil {
+			if isRequestTooLarge(err) {
+				return nil, errPayloadTooLarge
+			}
 			return nil, fmt.Errorf("read upload: %w", err)
 		}
 		if len(bytes.TrimSpace(data)) == 0 {
 			return nil, errors.New("document content cannot be empty")
 		}
 		return data, nil
+	} else if isRequestTooLarge(err) {
+		return nil, errPayloadTooLarge
 	}
 
 	if content := c.PostForm("content"); strings.TrimSpace(content) != "" {
@@ -150,10 +164,24 @@ func readMarkdownPayload(c *gin.Context) ([]byte, error) {
 
 	data, err := io.ReadAll(c.Request.Body)
 	if err != nil {
+		if isRequestTooLarge(err) {
+			return nil, errPayloadTooLarge
+		}
 		return nil, fmt.Errorf("read request body: %w", err)
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
 		return nil, errors.New("document content cannot be empty")
 	}
 	return data, nil
+}
+
+func isRequestTooLarge(err error) bool {
+	if err == nil {
+		return false
+	}
+	var maxErr *http.MaxBytesError
+	if errors.As(err, &maxErr) {
+		return true
+	}
+	return false
 }
