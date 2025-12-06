@@ -23,7 +23,7 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: web
           push: true
           tags: |
             timwitzdam/obsidian-webpublish:${{ steps.get-latest-tag.outputs.tag }}
